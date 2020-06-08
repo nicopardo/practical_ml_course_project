@@ -1,0 +1,194 @@
+---
+title: "course_project"
+author: "nicopardo"
+date: "27 5 2020"
+output: html_document
+---
+
+This is the final project for the course practical machine learning in coursera. The Idea of the project is to apply machine learning methods to a real life data set. The setting of the exercise is Human Activity Recognition (HAM) for weight lifting. The idea is to identify the type of activity a person is performing and how well the person is performing the activity. The information available for the identification of the activity is the output of wearable accelerometers in different parts of the body.
+
+
+
+# Setting
+
+
+
+here is an extract explaining the setting of the analysis taken from the description of the exercise in the course page: "Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E)". The idea is to use features created from output of the accelerometers to classify the activity being performed.
+
+
+
+# Data loading and processing
+
+
+
+load the libraries and set seed:
+
+```{r, message=FALSE, warning=F}
+library(caret)
+library(dplyr)
+library(lubridate)
+library(corrplot)
+library(checkmate)
+library(rpart)
+library(rattle)
+
+set.seed(1234)
+```
+
+Next I download the training and testing sets from the webpage given in the course:
+
+```{r, message=FALSE, cache=TRUE}
+
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "pml-training.csv")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "pml-testing.csv")
+
+training <- read.csv("pml-training.csv")
+quiz <- read.csv("pml-testing.csv")
+```
+
+Now i quickly check that the number of classes and subjects match the description of the dataset
+
+```{r, message=FALSE, cache=TRUE}
+table(training$classe)
+table(training$user_name)
+```
+
+There are indeed 5 classes: A, B, C, D and E. And 6 subjects.
+
+
+
+## Cross validation
+
+
+
+For cross validation, I will split the training data into a training set containing 60% of the training data set, to train the models. And a test set, with the remaining 40% of the training data set to calculate the accuracy of the predictions. Then I will predict the activities for the quiz data set using the model that performs best.
+
+```{r, message=FALSE, cache=TRUE}
+intrain <- createDataPartition(y= training$classe, p=0.6, list = FALSE)
+training_set <- training[intrain,]
+test_set <- training[-intrain,]
+```
+
+I will then use the *training_set* for further processing of the data and features selection
+
+
+
+## Features selection
+
+First I take a look at variables containing missing values. For this I look for missing values in each variable, calculate the percentage of missing values in each variable and save the index of the variables with missing observations
+
+```{r, message=FALSE, cache=TRUE}
+missing <- tbl_df(data.frame(lapply(training_set, function(x) sum(is.na(x))/dim(training_set)[1])))
+vars_w_missing <- select_if(missing, function(x) mean(x)>0)
+vars_w_missing_index <- which(names(training_set) %in% names(vars_w_missing) )
+```
+
+For the variables with missing observations, 97% of the observations are missing values. Missing observatoins are distributed across classes and user names and they appear in the same accelerometer outcome for the different measurement devices. Since these variables only have a small number of useful observations, imputation would not make much sense, therefore I will exclude them from the analysis.
+
+In a next step I check for variables with very little variability, and collect the indexes of the variables flagged as having near zero variability by the function. I then remove all variables with missing values and near zero variability
+
+```{r, message=FALSE, cache=TRUE}
+nzv <- nearZeroVar(training_set, saveMetrics = T)
+nzv_index <- nearZeroVar(training_set)
+
+#check for variables with both missing values and near zero variability:
+index_in_common <- intersect(nzv_index, vars_w_missing_index)
+all_indexes_to_exclude <- union(nzv_index, vars_w_missing_index)
+
+#remove all "problematic" variables
+training_set_final <- training_set[,-all_indexes_to_exclude]
+```
+
+Finally, I discard some variables that arguably do not add any information for the prediction of the classes, namely id related variables and time stamps
+
+```{r, message=FALSE, cache=TRUE}
+training_set_final_2 <- training_set_final[,-c(1:5)]
+dim(training_set_final_2)
+```
+
+Next I take a rough look at apparent correlations of the remaining features in the training set
+
+```{r, message=FALSE, cache=TRUE}
+corrmat <- cor(training_set_final_2[,-54])
+plot_corrmat <- corrplot(corrmat, order = "FPC", tl.cex = 0.5, tl.col = "black", type = "lower")
+```
+
+The graph shows that there are some high correlations between different variables. However, high correlations do not appear to be widespread in the data, therefore this does not seem to pose any significant problem for the analysis, so I will not discard correlated variables from the analysis.
+
+Finally, I have perform the same variable selection for the test set and the quiz set
+
+```{r, message=FALSE, cache=TRUE}
+#test set
+test_set_final <- test_set[,-all_indexes_to_exclude]
+test_set_final_2 <- test_set_final[,-c(1:5)]
+
+#quiz set
+quiz_final <- quiz[,-all_indexes_to_exclude]
+quiz_final_2 <- quiz_final[,-c(1:5)]
+```
+
+
+
+# Training algorithms
+
+
+
+For the prediction of the activities I will use three models: decision trees, random forest and generalized boosting models. Then I will pick the model that predicts the outcomes with the highest accuracy and efficiency.
+
+First I start with a decision tree. In the code below I train the algorithm using the rpart package, then I show a dendrogram of the decision tree and then use the model fit to predict the activities in the test set. Then I present the accuracy of the model.
+
+```{r, message=FALSE, cache=TRUE}
+fit_dt <- rpart(classe~., method="class", data = training_set_final_2)
+fancyRpartPlot(fit_dt)
+pred_dt <- predict(fit_dt, test_set_final_2, type = "class")
+confmat_dt <- confusionMatrix(pred_dt, test_set_final_2$classe)
+confmat_dt
+accuracy_dt <- confmat_dt$overall[[1]]
+accuracy_dt
+```
+
+The model has an accuracy of `r accuracy_dt` and a corresponding estimated out-of-sample error of `r 1- accuracy_dt`.
+
+Next I run random forest to predict the classes using the caret package. I then present measures of accuracy of the model in the test set.
+
+```{r, message=FALSE, cache=TRUE}
+fit_rf <- train(classe~., method="rf", data=training_set_final_2)
+pred_rf <- predict(fit_rf, test_set_final_2)
+confmat_rf <- confusionMatrix(pred_rf, test_set_final_2$classe)
+confmat_rf
+accuracy_rf <- confmat_rf$overall[[1]]
+accuracy_rf
+```
+
+The model performs very well, with an accuracy of `r accuracy_rf`, therefore the expected out of sample error is very small, `r 1- accuracy_rf`. However one has to bear in mind that there is a possibility that the model is overfitting the data.
+
+Finally, I run generalized boosting using the caret package, and present measures of the accuracy of the model in the test set.
+
+```{r, message=FALSE, warning=F, cache=TRUE}
+fit_boost <- train(classe~., method="gbm", data = training_set_final_2, verbose=F)
+pred_boost <- predict(fit_boost, training_set_final_2)
+confmat_boost <- confusionMatrix(pred_boost, training_set_final_2$classe)
+confmat_boost
+accuracy_boost <- confmat_boost$overall[[1]]
+accuracy_boost
+```
+
+Boosting also performs very well. Its accuracy is `r accuracy_boost` and the expected out of sample error would therefore be `r 1- accuracy_boost`. However, the same caveat when using random forest applies.
+
+From the outcome of the three models, the decision tree was the algorithm with the lowest accuracy. random forest and boosting performed very well, however, random forest had a higher accuracy, and the computation time for the training of the boosting algorithm was significantly longer. Therefore, the model that produced a higher accuracy with the least computation time was random forest, so I choose this model to predict the quiz classes.
+
+# Quiz part
+
+Here I use random forest to predict the classes in the quiz set
+
+```{r, message=FALSE, cache=TRUE}
+quiz_prediction <- predict(fit_rf, quiz_final_2)
+quiz_prediction
+```
+
+
+
+
+
+
+
